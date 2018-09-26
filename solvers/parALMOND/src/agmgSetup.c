@@ -36,6 +36,19 @@ csr *galerkinProd(agmgLevel *level, csr *R, csr *A, csr *P);
 void coarsenAgmgLevel(agmgLevel *level, csr **coarseA, csr **P, csr **R, dfloat **nullCoarseA, setupAide options);
 
 
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+//   my prototipes
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+csr *strong_graph2(csr *A, dfloat threshold);
+
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void agmgSetup(parAlmond_t *parAlmond, csr *A, dfloat *nullA, hlong *globalRowStarts, setupAide options){
 
   int rank, size;
@@ -43,7 +56,8 @@ void agmgSetup(parAlmond_t *parAlmond, csr *A, dfloat *nullA, hlong *globalRowSt
   size = agmg::size;
 
   // approximate Nrows at coarsest level
-  int gCoarseSize = 1000;
+  //int gCoarseSize = 1000;     // let it be momre small
+  int gCoarseSize = 500;     // let it be momre small
 
   double seed = (double) rank;
   srand48(seed);
@@ -273,63 +287,66 @@ void parAlmondReport(parAlmond_t *parAlmond) {
 //create coarsened problem
 void coarsenAgmgLevel(agmgLevel *level, csr **coarseA, csr **P, csr **R, dfloat **nullCoarseA, setupAide options){
 
+
+  printf("\n >>>>  coarsenAGMGLevel is called !!!  \n");
+
   // establish the graph of strong connections
-  level->threshold = 0.5;
+  level->threshold = 0.5;                             // probably I need a different threshold (epsilon)  
+  level->threshold = 0.25;                             // my epsilon
+  //csr *C = strong_graph(level->A, level->threshold);  // default so change it by the one that I need 
+  csr *C = strong_graph2(level->A, level->threshold);   // my strong graph :)
 
-  csr *C = strong_graph(level->A, level->threshold);
+  hlong *FineToCoarse = form_aggregates(level, C);    // Here I will add smooth aggregation as new option 
 
-  hlong *FineToCoarse = form_aggregates(level, C);
-
-  find_aggregate_owners(level,FineToCoarse,options);
-
-  *P = construct_interpolator(level, FineToCoarse, nullCoarseA);
-  *R = transpose(level, *P, level->globalRowStarts, level->globalAggStarts);
-  *coarseA = galerkinProd(level, *R, level->A, *P);
+  find_aggregate_owners(level,FineToCoarse,options);                               
+  *P = construct_interpolator(level, FineToCoarse, nullCoarseA);   	 	// construct the Prolongation... hopefully is the same
+  *R = transpose(level, *P, level->globalRowStarts, level->globalAggStarts);	// R = P' so it should be the same 
+  *coarseA = galerkinProd(level, *R, level->A, *P);				// A_2h = P(A_h)R so it should be the same
 }
 
 csr * strong_graph(csr *A, dfloat threshold){
-
   const dlong N = A->Nrows;
   const dlong M = A->Ncols;
 
-  csr *C = (csr *) calloc(1, sizeof(csr));
+  csr *C = (csr *) calloc(1, sizeof(csr));   // allocate memory
 
-  C->Nrows = N;
-  C->Ncols = M;
+  C->Nrows = N;  // set number of rows
+  C->Ncols = M;  // set number of columns
 
-  C->diagRowStarts = (dlong *) calloc(N+1,sizeof(dlong));
-  C->offdRowStarts = (dlong *) calloc(N+1,sizeof(dlong));
+  C->diagRowStarts = (dlong *) calloc(N+1,sizeof(dlong));    // allocate memory for local data
+  C->offdRowStarts = (dlong *) calloc(N+1,sizeof(dlong));    // allocate memory for non-local data 
 
   dfloat *maxOD;
-  if (N) maxOD = (dfloat *) calloc(N,sizeof(dfloat));
+  if (N) maxOD = (dfloat *) calloc(N,sizeof(dfloat));  // create "maxOD" and set each entry to 0
 
   //store the diagonal of A for all needed columns
   dfloat *diagA = (dfloat *) calloc(M,sizeof(dfloat));
   for (dlong i=0;i<N;i++)
     diagA[i] = A->diagCoefs[A->diagRowStarts[i]];
+
   csrHaloExchange(A, sizeof(dfloat), diagA, A->sendBuffer, diagA+A->NlocalCols);
 
   #pragma omp parallel for
   for(dlong i=0; i<N; i++){
-    dfloat sign = (diagA[i] >= 0) ? 1:-1;
+    dfloat sign = (diagA[i] >= 0) ? 1:-1;    // compute sign of A[i][i]
     dfloat Aii = fabs(diagA[i]);
 
     //find maxOD
-    //local entries
+    //local entries  // compute the max S_i*A_ij for each "node i" in local entries
     dlong Jstart = A->diagRowStarts[i], Jend = A->diagRowStarts[i+1];
     for(dlong jj= Jstart+1; jj<Jend; jj++){
       dlong col = A->diagCols[jj];
       dfloat Ajj = fabs(diagA[col]);
       dfloat OD = -sign*A->diagCoefs[jj]/(sqrt(Aii)*sqrt(Ajj));
-      if(OD > maxOD[i]) maxOD[i] = OD;
+      if(OD > maxOD[i]) maxOD[i] = OD;  // stored here 
     }
-    //non-local entries
+    //non-local entries  // compute the max S_i * A_ij for each "node i" in non-local entries
     Jstart = A->offdRowStarts[i], Jend = A->offdRowStarts[i+1];
     for(dlong jj= Jstart; jj<Jend; jj++){
       dlong col = A->offdCols[jj];
       dfloat Ajj = fabs(diagA[col]);
       dfloat OD = -sign*A->offdCoefs[jj]/(sqrt(Aii)*sqrt(Ajj));
-      if(OD > maxOD[i]) maxOD[i] = OD;
+      if(OD > maxOD[i]) maxOD[i] = OD; // if this is greater than the local one, it's updated
     }
 
     int diag_strong_per_row = 1; // diagonal entry
@@ -338,8 +355,8 @@ csr * strong_graph(csr *A, dfloat threshold){
     for(dlong jj = Jstart+1; jj<Jend; jj++){
       dlong col = A->diagCols[jj];
       dfloat Ajj = fabs(diagA[col]);
-      dfloat OD = -sign*A->diagCoefs[jj]/(sqrt(Aii)*sqrt(Ajj));
-      if(OD > threshold*maxOD[i]) diag_strong_per_row++;
+      dfloat OD = -sign*A->diagCoefs[jj]/(sqrt(Aii)*sqrt(Ajj));  // this is not the measure in the paper ( this is normalized )
+      if(OD > threshold*maxOD[i]) diag_strong_per_row++;     // count the number of local strong connections in "column i"
     }
     int offd_strong_per_row = 0;
     //non-local entries
@@ -348,54 +365,70 @@ csr * strong_graph(csr *A, dfloat threshold){
       dlong col = A->offdCols[jj];
       dfloat Ajj = fabs(diagA[col]);
       dfloat OD = -sign*A->offdCoefs[jj]/(sqrt(Aii)*sqrt(Ajj));
-      if(OD > threshold*maxOD[i]) offd_strong_per_row++;
+      if(OD > threshold*maxOD[i]) offd_strong_per_row++;    // count the number of non-local strong connections in "column i"
     }
 
-    C->diagRowStarts[i+1] = diag_strong_per_row;
-    C->offdRowStarts[i+1] = offd_strong_per_row;
+    C->diagRowStarts[i+1] = diag_strong_per_row;    // store in "i+1" the number of strong connected local entries
+    C->offdRowStarts[i+1] = offd_strong_per_row;    // store in "i+1" the number of strong connected non-local entries
   }
 
   // cumulative sum
   for(dlong i=1; i<N+1 ; i++) {
-    C->diagRowStarts[i] += C->diagRowStarts[i-1];
-    C->offdRowStarts[i] += C->offdRowStarts[i-1];
+    C->diagRowStarts[i] += C->diagRowStarts[i-1]; // update diagRowStarts[i] = diagRowStarts[i-1] + number of entries
+    C->offdRowStarts[i] += C->offdRowStarts[i-1]; // update  offRowStarts[i] = offRowStarts[i-1] + number of entries 
   }
 
-  C->diagNNZ = C->diagRowStarts[N];
-  C->offdNNZ = C->offdRowStarts[N];
+  C->diagNNZ = C->diagRowStarts[N];   // update the size of local entries
+  C->offdNNZ = C->offdRowStarts[N];   // update the size of non-local entries
 
-  if (C->diagNNZ) C->diagCols = (dlong *) calloc(C->diagNNZ, sizeof(dlong));
-  if (C->offdNNZ) C->offdCols = (dlong *) calloc(C->offdNNZ, sizeof(dlong));
+  if (C->diagNNZ) C->diagCols = (dlong *) calloc(C->diagNNZ, sizeof(dlong));  // allocate memory for the local entries and set it to 0
+  if (C->offdNNZ) C->offdCols = (dlong *) calloc(C->offdNNZ, sizeof(dlong));  // allocate memory for the non-local entries  and set it to 0
 
   // fill in the columns for strong connections
   #pragma omp parallel for
   for(dlong i=0; i<N; i++){
-    dfloat sign = (diagA[i] >= 0) ? 1:-1;
-    dfloat Aii = fabs(diagA[i]);
+    dfloat sign = (diagA[i] >= 0) ? 1:-1;    // compute sign of A[i][i]
+    dfloat Aii = fabs(diagA[i]);	     // compute abs value of A[i][i]
 
-    dlong diagCounter = C->diagRowStarts[i];
-    dlong offdCounter = C->offdRowStarts[i];
+    dlong diagCounter = C->diagRowStarts[i]; // start of the local entries in "column i"
+    dlong offdCounter = C->offdRowStarts[i]; // start of the non-local entries in "column i"
 
     //local entries
-    C->diagCols[diagCounter++] = i;// diag entry
-    dlong Jstart = A->diagRowStarts[i], Jend = A->diagRowStarts[i+1];
-    for(dlong jj = Jstart+1; jj<Jend; jj++){
-      dlong col = A->diagCols[jj];
+    C->diagCols[diagCounter++] = i;  // diag entry  // for each "node i"
+    dlong Jstart = A->diagRowStarts[i], Jend = A->diagRowStarts[i+1]; // start & end of rows for "node i"
+    for(dlong jj = Jstart+1; jj<Jend; jj++){     // loop over all entries in (start/end)
+      dlong col = A->diagCols[jj];               
       dfloat Ajj = fabs(diagA[col]);
       dfloat OD = -sign*A->diagCoefs[jj]/(sqrt(Aii)*sqrt(Ajj));
-      if(OD > threshold*maxOD[i])
-        C->diagCols[diagCounter++] = A->diagCols[jj];
+      if(OD > threshold*maxOD[i])      // compare the measure of each entry  wrt ( threshold * max )
+        C->diagCols[diagCounter++] = A->diagCols[jj];  //  store the corresponding columns for  indices
     }
-    Jstart = A->offdRowStarts[i], Jend = A->offdRowStarts[i+1];
-    for(dlong jj = Jstart; jj<Jend; jj++){
+    // non-local entries   // for each "node i"
+    Jstart = A->offdRowStarts[i], Jend = A->offdRowStarts[i+1];   // start & end of rows for "node i"
+    for(dlong jj = Jstart; jj<Jend; jj++){    // loop over all entries in (start/end)
       dlong col = A->offdCols[jj];
       dfloat Ajj = fabs(diagA[col]);
       dfloat OD = -sign*A->offdCoefs[jj]/(sqrt(Aii)*sqrt(Ajj));
-      if(OD > threshold*maxOD[i])
-        C->offdCols[offdCounter++] = A->offdCols[jj];
+      if(OD > threshold*maxOD[i])      // compare the measure of each entry  wrt ( threshold * max )
+        C->offdCols[offdCounter++] = A->offdCols[jj];  //  store the corresponding columns for  indices
     }
   }
   if(N) free(maxOD);
+
+  // this exploit the format CSR, since C is fake matrix since it only create the indices corresponding to the strong connections
+  // but not the entry which is 1 and usesless. The strong connections are: 
+
+   /*for (dlong i = 0 ; i < N : i++){
+ 	for (dlong jj = C-diagRowStarts[i]+1; jj < C->diagRowStarts[i+1] ; jj++)
+	    printf("\n(%d,%d)\n", i , C->diagCols[jj] );
+	for (dlong jj = C->offdRowStarts[i] ; jj < C->offdRowStarts[i+1] ; jj++)
+	    printf("\n(%d,%d)\n", i , C->offdCols[jj] );
+     }*/		  
+
+     		 
+  printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+  printf("\n+++\t diagNNZ = %d \t  offdNNZ = %d \t   ++++++\n",C->diagNNZ,C->offdNNZ);
+  printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
 
   return C;
 }
@@ -1013,7 +1046,6 @@ void find_aggregate_owners(agmgLevel *level, hlong* FineToCoarse, setupAide opti
   free(sendAggs);
 }
 
-
 csr *construct_interpolator(agmgLevel *level, hlong *FineToCoarse, dfloat **nullCoarseA){
   // MPI info
   int rank, size;
@@ -1225,8 +1257,7 @@ int compareNonZero(const void *a, const void *b){
   return 0;
 };
 
-csr * transpose(agmgLevel* level, csr *A,
-                hlong *globalRowStarts, hlong *globalColStarts){
+csr * transpose(agmgLevel* level, csr *A, hlong *globalRowStarts, hlong *globalColStarts){
 
   // MPI info
   int rank, size;
@@ -1754,4 +1785,135 @@ csr *galerkinProd(agmgLevel *level, csr *R, csr *A, csr *P){
 
   return RAP;
 }
+
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// My modifications
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+csr * strong_graph2(csr *A, dfloat threshold){
+
+  const dlong N = A->Nrows;
+  const dlong M = A->Ncols;
+
+  csr *C = (csr *) calloc(1, sizeof(csr));   // allocate memory
+
+  C->Nrows = N;  // set number of rows
+  C->Ncols = M;  // set number of columns
+
+  C->diagRowStarts = (dlong *) calloc(N+1,sizeof(dlong));    // allocate memory for local data
+  C->offdRowStarts = (dlong *) calloc(N+1,sizeof(dlong));    // allocate memory for non-local data 
+
+  dfloat *maxOD;
+  if (N) maxOD = (dfloat *) calloc(N,sizeof(dfloat));  // create "maxOD" and set each entry to 0
+
+  //store the diagonal of A for all needed columns
+  dfloat *diagA = (dfloat *) calloc(M,sizeof(dfloat));
+  for (dlong i=0;i<N;i++)
+    diagA[i] = A->diagCoefs[A->diagRowStarts[i]];
+
+  csrHaloExchange(A, sizeof(dfloat), diagA, A->sendBuffer, diagA+A->NlocalCols);
+
+  #pragma omp parallel for
+  for(dlong i=0; i<N; i++){
+    //dfloat sign = (diagA[i] >= 0) ? 1:-1;    // compute sign of A[i][i]
+    dfloat Aii = diagA[i];
+
+    int diag_strong_per_row = 1; // diagonal entry
+    //local entries
+    dlong Jstart = A->diagRowStarts[i], Jend = A->diagRowStarts[i+1]; // start & end of rows for "node i"
+    //Jstart = A->diagRowStarts[i], Jend = A->diagRowStarts[i+1];
+    for(dlong jj = Jstart+1; jj<Jend; jj++){
+      dlong col = A->diagCols[jj];
+      dfloat Ajj = diagA[col];
+      if(fabs(Ajj) > threshold*sqrt(Ajj*Aii)) diag_strong_per_row++;     // count the number of local strong connections in "column i"
+    }
+    int offd_strong_per_row = 0;
+    //non-local entries
+    Jstart = A->offdRowStarts[i], Jend = A->offdRowStarts[i+1];
+    for(dlong jj= Jstart; jj<Jend; jj++){
+      dlong col = A->offdCols[jj];
+      dfloat Ajj = diagA[col];
+      if(fabs(Ajj) > threshold*sqrt(Ajj*Aii)) offd_strong_per_row++;    // count the number of non-local strong connections in "column i"
+    }
+
+    C->diagRowStarts[i+1] = diag_strong_per_row;    // store in "i+1" the number of strong connected local entries
+    C->offdRowStarts[i+1] = offd_strong_per_row;    // store in "i+1" the number of strong connected non-local entries
+  }
+
+  // cumulative sum
+  for(dlong i=1; i<N+1 ; i++) {
+    C->diagRowStarts[i] += C->diagRowStarts[i-1]; // update diagRowStarts[i] = diagRowStarts[i-1] + number of entries
+    C->offdRowStarts[i] += C->offdRowStarts[i-1]; // update  offRowStarts[i] = offRowStarts[i-1] + number of entries 
+  }
+
+  C->diagNNZ = C->diagRowStarts[N];   // update the size of local entries
+  C->offdNNZ = C->offdRowStarts[N];   // update the size of non-local entries
+
+  if (C->diagNNZ) C->diagCols = (dlong *) calloc(C->diagNNZ, sizeof(dlong));  // allocate memory for the local entries and set it to 0
+  if (C->offdNNZ) C->offdCols = (dlong *) calloc(C->offdNNZ, sizeof(dlong));  // allocate memory for the non-local entries  and set it to 0
+
+  // fill in the columns for strong connections
+  #pragma omp parallel for
+  for(dlong i=0; i<N; i++){
+    dfloat Aii = diagA[i];	     // compute abs value of A[i][i]
+
+    dlong diagCounter = C->diagRowStarts[i]; // start of the local entries in "column i"
+    dlong offdCounter = C->offdRowStarts[i]; // start of the non-local entries in "column i"
+
+    //local entries
+    C->diagCols[diagCounter++] = i;  // diag entry  // for each "node i"
+    dlong Jstart = A->diagRowStarts[i], Jend = A->diagRowStarts[i+1]; // start & end of rows for "node i"
+    for(dlong jj = Jstart+1; jj<Jend; jj++){     // loop over all entries in (start/end)
+      dlong col = A->diagCols[jj];               
+      dfloat Ajj = diagA[col];
+      if( fabs(Ajj) > threshold*sqrt(Ajj*Aii))      // compare the measure of each entry  wrt ( threshold * max )
+        C->diagCols[diagCounter++] = A->diagCols[jj];  //  store the corresponding columns for  indices
+    }
+    // non-local entries   // for each "node i"
+    Jstart = A->offdRowStarts[i], Jend = A->offdRowStarts[i+1];   // start & end of rows for "node i"
+    for(dlong jj = Jstart; jj<Jend; jj++){    // loop over all entries in (start/end)
+      dlong col = A->offdCols[jj];
+      dfloat Ajj = diagA[col];      
+      if(fabs(Ajj) > threshold*sqrt(Aii*Ajj))      // compare the measure of each entry  wrt ( threshold * max )
+        C->offdCols[offdCounter++] = A->offdCols[jj];  //  store the corresponding columns for  indices
+    }
+  }
+  if(N) free(maxOD);
+
+  // this exploit the format CSR, since C is fake matrix since it only create the indices corresponding to the strong connections
+  // but not the entry which is 1 and usesless. The strong connections are: 
+
+   /*for (dlong i = 0 ; i < N : i++){
+ 	for (dlong jj = C-diagRowStarts[i]+1; jj < C->diagRowStarts[i+1] ; jj++)
+	    printf("\n(%d,%d)\n", i , C->diagCols[jj] );
+	for (dlong jj = C->offdRowStarts[i] ; jj < C->offdRowStarts[i+1] ; jj++)
+	    printf("\n(%d,%d)\n", i , C->offdCols[jj] );
+     }*/		  
+  
+  printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+  printf("\n+++\t diagNNZ = %d \t  offdNNZ = %d \t   ++++++\n",C->diagNNZ,C->offdNNZ);
+  printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+   	
+ 
+  return C;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
