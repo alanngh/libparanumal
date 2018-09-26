@@ -14,10 +14,10 @@ data/ellipticHomogeneous2D.h
 3
 
 [POLYNOMIAL DEGREE]
-4
+3
 
 [THREAD MODEL]
-Serial
+CUDA
 
 [PLATFORM NUMBER]
 0
@@ -42,8 +42,7 @@ NODAL
 
 # can be NONE, JACOBI, MASSMATRIX, FULLALMOND, SEMFEM, or MULTIGRID
 [PRECONDITIONER]
-MULTIGRID
-
+FULLALMOND
 
 ########## MULTIGRID Options ##############
 
