@@ -5,7 +5,7 @@
 data/ellipticHomogeneous2D.h
 
 [MESH FILE]
-../../meshes/cavityH00125.msh
+../../meshes/cavityH0025.msh
 
 [MESH DIMENSION]
 2
@@ -30,7 +30,7 @@ CUDA
 
 # can add FLEXIBLE to PCG
 [KRYLOV SOLVER]
-PCG+FLEXIBLE
+PCG
 
 # can be IPDG, or CONTINUOUS
 [DISCRETIZATION]
@@ -71,7 +71,7 @@ KCYCLE
 
 # can be DAMPEDJACOBI or CHEBYSHEV
 [PARALMOND SMOOTHER]
-CHEBYSHEV
+DAMPEDJACOBI
 
 # can be any integer >0
 [PARALMOND CHEBYSHEV DEGREE]
@@ -91,3 +91,25 @@ cavity
 
 [VERBOSE]
 TRUE
+
+
+###########################################
+#  my parametheres
+###########################################
+
+
+# 0 libparanumal, 1 my modifications, 2 hybrid
+[MYFUNCTIONS]
+10
+
+[FINALCOARSEGRIDSIZE]
+1000
+
+# positive number less than 1
+[COARSENTHRESHOLD]
+0.1
+
+# residuals printend in matlab format to be ploted
+[MATLAB]
+0
+
