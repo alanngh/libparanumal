@@ -42,7 +42,7 @@ csr *strong_graph2(csr *A, dfloat threshold);
 hlong *form_aggregates2(agmgLevel *level, csr *C);
 csr  *OneSmooth(agmgLevel *level, double w,csr *A,csr *P);
 csr *construct_interpolator2(agmgLevel *level, hlong *FineToCoarse, dfloat **nullCoarseA);
-
+hlong *form_aggregates3(agmgLevel *level, csr *C,setupAide options);
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -313,10 +313,16 @@ void coarsenAgmgLevel(agmgLevel *level, csr **coarseA, csr **P, csr **R, dfloat 
        
   }
   else if (MyKey ==1){
-	    options.getArgs("COARSENTHRESHOLD",level->threshold);   // get from setup file
+	    /*options.getArgs("COARSENTHRESHOLD",level->threshold);   // get from setup file
      	C = strong_graph2(level->A, level->threshold);   // my strong graph :)
 		FineToCoarse = form_aggregates2(level, C);    // my algorithm		 
-		//find_aggregate_owners(level,FineToCoarse,options);  // ?
+		//find_aggregate_owners(level,FineToCoarse,options);  // ?  */
+		
+		options.getArgs("COARSENTHRESHOLD",level->threshold);   // get from setup file
+     	C = strong_graph(level->A, level->threshold);   // my strong graph :)
+		FineToCoarse = form_aggregates3(level, C,options);    // my algorithm		 
+		
+		
 	
   } else{
 	    options.getArgs("COARSENTHRESHOLD",level->threshold);   // get from setup file
@@ -945,11 +951,11 @@ hlong * form_aggregates(agmgLevel *level, csr *C){
 
   //TODO maybe free C here?
   // print aggregates
-  /*printf("\n++++++++++++++\n  N agg = %d  \n+++++++++++++++++++\n",numAggs);
+  /*
+  printf("\n++++++++++++++\n  N agg = %d  \n+++++++++++++++++++\n",numAggs);
   int N_agg[numAggs];
   for (int i=0;i<numAggs;i++){
-	  N_agg[i]=0;
-	  * 
+	  N_agg[i]=0; 
   }for (int i=0;i<N;i++){
 	  N_agg[FineToCoarse[i]]++;
   }for (int i=0;i<numAggs;i++){
@@ -3059,10 +3065,323 @@ csr *OneSmooth(agmgLevel *level, double w,csr *A,csr *P){
 
 
 
+typedef struct{
+	dlong index;
+	dlong Nnbs;
+	dlong *nbs;
+} nbs_t;
+
+
+int compareNBS(const void *a, const void *b){
+	nbs_t *pa = (nbs_t *)a;	
+	nbs_t *pb = (nbs_t *)b;
+	
+	
+	if (pa->Nnbs < pb->Nnbs)	return +1;
+	if (pa->Nnbs > pb->Nnbs)	return -1;
+	if (pa->index < pa->index )	return +1;
+	if (pa->index > pa->index )	return -1;
+	
+	return 0;
+}
 
 
 
+hlong * form_aggregates3(agmgLevel *level, csr *C,setupAide options){
 
+  int rank, size;
+  rank = agmg::rank;
+  size = agmg::size;
+
+  const dlong N   = C->Nrows;
+  const dlong M   = C->Ncols;
+  const dlong diagNNZ = C->diagNNZ;
+  const dlong offdNNZ = C->offdNNZ;
+  
+  printf("\n++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+  printf("++ \t  N = %d   \t  M=%d   \t  (%d ,%d) \t ++ \n",N,M,diagNNZ,offdNNZ);
+  printf("\n++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+
+  hlong *FineToCoarse = (hlong *) calloc(M, sizeof(hlong));
+  for (dlong i =0;i<M;i++) FineToCoarse[i] = -1;
+
+  int   *states = (int *)   calloc(M, sizeof(int));
+
+  csr *A = level->A;
+  hlong *globalRowStarts = level->globalRowStarts;
+
+  int    *intSendBuffer;
+  hlong  *hlongSendBuffer;
+  dfloat *dfloatSendBuffer;
+  if (level->A->NsendTotal) {
+    intSendBuffer = (int *) calloc(A->NsendTotal,sizeof(int));
+    hlongSendBuffer = (hlong *) calloc(A->NsendTotal,sizeof(hlong));
+    dfloatSendBuffer = (dfloat *) calloc(A->NsendTotal,sizeof(dfloat));
+  }
+
+
+  for(dlong i=0; i<N; i++)
+    states[i] = -1;
+
+  // add the number of non-zeros in each column
+  //local non-zeros
+
+  int *nnzCnt, *recvNnzCnt;
+  if (A->NHalo) nnzCnt = (int *) calloc(A->NHalo,sizeof(int));
+  if (A->NsendTotal) recvNnzCnt = (int *) calloc(A->NsendTotal,sizeof(int));
+  
+  
+  nbs_t *V = (nbs_t *) calloc(N,sizeof(nbs_t));
+	
+	 
+  //construct local-strong neigboors
+  for(dlong i=0; i<N; i++){  // should be Nlocal ?
+	V[i].index = i;
+	V[i].Nnbs  = C->diagRowStarts[i+1] - C->diagRowStarts[i];  
+	V[i].nbs   = (dlong *) calloc(V[i].Nnbs,sizeof(dlong));
+	for (int j=0 ; j < V[i].Nnbs ; j++  ){
+		V[i].nbs[j] =  C->diagCols[C->diagRowStarts[i] + j];
+	}
+  }
+  
+  /*
+  printf("\n local neighborhood befor qsort \n");
+  for(int i=0;i<N;i++){
+		printf("\n (i = %d, # = %d)\t",V[i].index,V[i].Nnbs);
+		for( int j=0;j<V[i].Nnbs;j++)
+				printf("%d ",V[i].nbs[j]);
+  } 
+  */
+
+
+// sort V base on something  
+int MySort = 0;
+
+options.getArgs("SORT",MySort);
+
+if (MySort>0)	qsort(V,N,sizeof(nbs_t),compareNBS);
+	
+/*	
+  printf("\n local neighborhood after qsort \n");
+  for(int i=0;i<N;i++){
+		printf("\n (i = %d, # = %d)\t",V[i].index,V[i].Nnbs);
+		for( int j=0;j<V[i].Nnbs;j++)
+				printf("%d ",V[i].nbs[j]);
+  }
+  */
+   
+  int R_num = 0;
+  
+   
+  for (int i=0;i<N;i++)
+	if(V[i].Nnbs>1)
+		R_num++;
+
+
+	
+
+  int R_nodes[R_num];
+  int R_pos[R_num];
+  int k = 0;
+  
+  for (int i=0;i<N;i++){
+	if(V[i].Nnbs>1){
+		R_nodes[k] = V[i].index;
+		R_pos[k] = i;
+		k++;
+	}
+  }
+
+
+ hlong done =0;
+ int Agg_num = 0;
+ 
+ /*
+ printf("\n==============\n # agg=%d  N=%d \n=================\n",Agg_num,N);
+ for(int i=0;i<N;i++)
+	printf("\%d ",states[i]);
+ */
+	
+	 #pragma omp parallel for
+	 for(dlong i=0; i<R_num; i++){
+		if (states[R_nodes[i]] == -1){
+			int ok = 0;
+			//printf("\n  node %d free checking nbs \n",R_nodes[i]);
+			for(int j=1; j<V[R_pos[i]].Nnbs;j++){ // 0 is itself
+				//printf("%d ",V[R_pos[i]].nbs[j]);
+				if (states[V[R_pos[i]].nbs[j]]>-1){
+					ok=1;
+					j = V[R_nodes[i]].Nnbs +10;
+				}
+			}
+				//ok = ok + states[V[R_nodes[i]].nbs[j]];
+			//if (ok == -V[R_nodes[i]].Nnbs){
+			if (ok == 0){
+				//printf("\n neighborhood %d   libre....\n",R_nodes[i]);
+				for(int j=0; j<V[R_pos[i]].Nnbs;j++){
+					states[V[R_pos[i]].nbs[j]] = Agg_num;				
+				}
+				
+				//for(int i=0;i<N;i++)
+				//	printf("%d(%d) ",i,states[i]); 
+				
+				Agg_num++;
+			}
+		}	 
+	 }
+	 
+	 printf("\n\n>>>>>>  N 1st aggregates = %d >>>>>>>>\n\n",Agg_num);
+	
+/*	 
+printf("\n==============\n # agg=%d   N=%d \n=================\n",Agg_num,N);
+ for(int i=0;i<N;i++)
+	printf("nodo = %d   agg =%d\n",i,states[i]); 
+*/
+
+R_num=0;
+
+for (int i=0;i<N;i++)   // number of non-aggregate nodes
+	if (states[i]==-1)
+		R_num++;
+
+k = 0;
+for (int i=0;i<N;i++){  // update list of  non-agreggate nodes
+	if (states[V[i].index]==-1){
+		R_nodes[k] = V[i].index;
+		R_pos[k] = i;
+		k++;
+	}
+} 
+
+int *psudoAgg = (int *) calloc(N,sizeof(int));
+
+for (dlong i=0;i<N;i++)
+	if (states[V[i].index]>-1)
+		psudoAgg[states[V[i].index]]++;
+	
+/*
+printf("\n------------------------------------------\n");
+for(dlong i=0; i<Agg_num; i++)
+	printf("\n Aggregate = %d, Naggr =%d ",i,psudoAgg[i]);
+printf("\n------------------------------------------\n");
+*/
+	 #pragma omp parallel for
+	 for(dlong i=0; i<R_num; i++){
+		if (states[R_nodes[i]] == -1){  // sanity check			
+			if (V[R_pos[i]].Nnbs>1){  // at most one neigbor
+				int Agg_max;
+				int posIndx = 0;
+				int MoreAgg[Agg_num];
+				for (int j=0;j<Agg_num;j++)
+					MoreAgg[j]=0;
+					
+				//printf("\n checking nbs.... \n");	
+				for(int j=1; j<V[R_pos[i]].Nnbs;j++){  // index 0 is itself
+					if (states[V[R_pos[i]].nbs[j]] > -1){
+						MoreAgg[states[V[R_pos[i]].nbs[j]]]++;
+						//printf("%d ",V[R_pos[i]].nbs[j]);	
+					}
+				}
+					
+				/*	
+				printf("\n R-node = %d \n",R_nodes[i]);		
+				for (int j=0;j<Agg_num;j++)
+					printf("%d ",MoreAgg[j]);	
+				printf("\n");	
+				*/
+					
+				Agg_max = -1;
+				for (int j=0;j<Agg_num;j++){
+					if (Agg_max <= MoreAgg[j]){
+						if (j == 0){
+							Agg_max = MoreAgg[j];
+							posIndx = j;
+						}
+						else if (Agg_max < MoreAgg[j]){							
+							Agg_max = MoreAgg[j];
+							posIndx = j;
+						}
+						else if (psudoAgg[posIndx] > psudoAgg[j]){
+							Agg_max = MoreAgg[j];
+							posIndx = j;
+						}
+					}
+				}
+				//printf("\n  Agg_max =%d en posIndx = %d \n",Agg_max,posIndx);		
+				states[R_nodes[i]] = posIndx;				
+				//printf("\n  node %d added to agg =%d \n",R_nodes[i],posIndx);		
+				psudoAgg[posIndx]++;
+			}
+			else{  // nodo aislado
+				states[R_nodes[i]] = Agg_num;
+				psudoAgg[Agg_num]++;
+				Agg_num++;			
+									
+			}			
+		}	 
+	 }
+	 
+	 printf("\n\n>>>>>>  N 2nd aggregates = %d >>>>>>>>\n\n",Agg_num);
+
+   // csrHaloExchange(A, sizeof(int), states, intSendBuffer, states+A->NlocalCols); como es local no deberia haber esto
+
+  dlong *gNumAggs = (dlong *) calloc(size,sizeof(dlong));
+  level->globalAggStarts = (hlong *) calloc(size+1,sizeof(hlong));
+  // count the coarse nodes/aggregates
+  
+    MPI_Allgather(&Agg_num,1,MPI_DLONG,gNumAggs,1,MPI_DLONG,agmg::comm);
+
+  level->globalAggStarts[0] = 0;
+  for (int r=0;r<size;r++)
+    level->globalAggStarts[r+1] = level->globalAggStarts[r] + gNumAggs[r];
+
+  // enumerate the coarse nodes/aggregates
+  for(dlong i=0; i<N; i++)
+    FineToCoarse[i] = level->globalAggStarts[rank] + states[i];
+
+  //share the initial aggregate flags
+  csrHaloExchange(A, sizeof(hlong), FineToCoarse, hlongSendBuffer, FineToCoarse+A->NlocalCols);
+
+ //////////////////////////////////////////////////////////////////////////////////////////////
+ // print FineToCoarse
+ /////////////////////////////////////////////////////////////////////////////////////////////
+/* printf("\n FineToCoarse...  numAgg = %d \n",Agg_num);
+  for(dlong i=0; i<N; i++)
+	printf("%d \t ",FineToCoarse[i]);
+  printf("\n-------------------\n");
+*/
+
+  if (level->A->NsendTotal) {
+    free(intSendBuffer);
+    free(hlongSendBuffer);
+    free(dfloatSendBuffer);
+  }
+
+
+/*	free(V);
+	free(R_nodes);
+	free(R_pos);
+*/
+  //TODO maybe free C here?
+// print aggregates info
+
+/*
+ printf("\n++++++++++++++\n  N agg = %d  \n+++++++++++++++++++\n",Agg_num);
+  int N_agg[Agg_num];
+  for (int i=0;i<Agg_num;i++){
+	  N_agg[i]=0;
+  }for (int i=0;i<N;i++){
+	  N_agg[FineToCoarse[i]]++;
+  }for (int i=0;i<Agg_num;i++){
+	  printf("\n Agg = %d  => %d",i,N_agg[i]);
+  }  
+  
+  */
+
+
+  return FineToCoarse;
+  
+}
 
 
 
