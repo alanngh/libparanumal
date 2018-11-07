@@ -100,16 +100,19 @@ TRUE
 
 # 0 libparanumal, 1 my modifications, 2 hybrid
 [MYFUNCTIONS]
-10
+1
 
 [FINALCOARSEGRIDSIZE]
 1000
 
 # positive number less than 1
 [COARSENTHRESHOLD]
-0.1
+0.5
 
 # residuals printend in matlab format to be ploted
 [MATLAB]
+1
+
+[SORT]
 0
 
