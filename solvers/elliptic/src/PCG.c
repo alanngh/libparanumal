@@ -117,11 +117,11 @@ int pcg(elliptic_t* elliptic, dfloat lambda,
     
     
     int Matlab = 0;
-    Matlab = options.getArgs("MATLAB",Matlab);   // get from setup file  
+   // Matlab = options.getArgs("MATLAB",Matlab);   // get from setup file  
     
     
     if (options.compareArgs("VERBOSE", "TRUE")&&(mesh->rank==0)){ 
-		if (!Matlab)
+		if (Matlab==0)
 			printf("CG: it %d r norm %12.12f alpha = %f \n",Niter, sqrt(rdotr1), alpha);
 		else
 			printf(" %12.12f , \n",sqrt(rdotr1));
